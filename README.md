@@ -4,6 +4,18 @@ A Python client for managing Caddy server configurations through its API.
 
 ## Installation
 
+### Production Installation (Recommended)
+
+For production workloads, it's recommended to install the package from PyPI:
+
+```bash
+pip install caddy-api-client
+```
+
+### Development Installation
+
+For development or if you need to modify the client:
+
 1. Clone the repository:
 ```bash
 git clone https://github.com/migetapp/caddy-api-client.git
@@ -69,7 +81,6 @@ client.update_domain(
 
 # Delete domain
 client.delete_domain("example.com")  # Removes domain and its redirect configuration
-```
 
 ## Features
 
