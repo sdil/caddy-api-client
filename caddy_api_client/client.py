@@ -113,7 +113,8 @@ class CaddyAPIClient:
 
     def add_domain_with_auto_tls(self, domain: str, target: str, target_port: int,
                             enable_security_headers: bool = False, enable_hsts: bool = False,
-                            frame_options: str = "DENY", enable_compression: bool = False) -> bool:
+                            frame_options: str = "DENY", enable_compression: bool = False,
+                            redirect_mode: str = None) -> bool:
         """Add or update domain with auto TLS configuration.
 
         Args:
@@ -124,6 +125,7 @@ class CaddyAPIClient:
             enable_hsts (bool, optional): Enable HSTS. Defaults to False.
             frame_options (str, optional): X-Frame-Options value. Defaults to "DENY".
             enable_compression (bool, optional): Enable compression. Defaults to False.
+            redirect_mode (str, optional): Redirect mode. Can be "www_to_domain" or "domain_to_www". Defaults to None.
 
         Returns:
             bool: True if successful
@@ -176,39 +178,63 @@ class CaddyAPIClient:
                 }]
             })
 
-            # Create route configuration
-            route = {
+            # Create routes configuration
+            routes = []
+            
+            # Handle domain names for redirect
+            base_domain = domain.replace('www.', '') if domain.startswith('www.') else domain
+            www_domain = f"www.{base_domain}"
+            
+            # Add redirect route if redirect_mode is specified
+            if redirect_mode:
+                source_domain = www_domain if redirect_mode == "www_to_domain" else base_domain
+                target_domain = base_domain if redirect_mode == "www_to_domain" else www_domain
+                
+                redirect_route = {
+                    "@id": f"{source_domain}-redirect",
+                    "match": [{"host": [source_domain]}],
+                    "handle": [{
+                        "handler": "static_response",
+                        "headers": {
+                            "Location": [f"https://{target_domain}{{http.request.uri}}"]
+                        },
+                        "status_code": 308
+                    }]
+                }
+                routes.append(redirect_route)
+
+            # Add main route
+            main_route = {
                 "@id": domain,
                 "match": [{"host": [domain]}],
                 "terminal": True,
                 "handle": handlers
             }
+            routes.append(main_route)
 
             # Get current routes
-            routes = config['apps']['http']['servers']['srv0']['routes']
+            current_routes = config['apps']['http']['servers']['srv0']['routes']
 
-            # Remove any existing routes for this domain and global ACME routes
-            routes = [r for r in routes if not (
-                r.get('@id') == domain or 
-                (r.get('match', [{}])[0].get('host', []) == [domain] and
-                 r.get('match', [{}])[0].get('path', []) == ["/.well-known/acme-challenge/*"]) or
-                (r.get('match', [{}])[0].get('path', []) == ["/.well-known/acme-challenge/*"] and
-                 not r.get('match', [{}])[0].get('host'))
+            # Remove any existing routes for this domain
+            current_routes = [r for r in current_routes if not (
+                r.get('@id') == domain or  # Main domain route
+                r.get('@id') == f"{domain}-redirect" or  # Redirect route for this domain
+                (r.get('match', [{}])[0].get('host', []) == [domain])  # Any route matching this domain
             )]
 
             # Find position after security routes but before domain routes
             insert_pos = 0
-            for i, r in enumerate(routes):
+            for i, r in enumerate(current_routes):
                 if r.get('handle', [{}])[0].get('handler') == 'static_response':
                     insert_pos = i + 1
                 elif '@id' in r:
                     break
 
-            # Insert domain route
-            routes.insert(insert_pos, route)
+            # Insert domain routes
+            current_routes[insert_pos:insert_pos] = routes
 
             # Update routes in config
-            config['apps']['http']['servers']['srv0']['routes'] = routes
+            config['apps']['http']['servers']['srv0']['routes'] = current_routes
 
             # Configure auto TLS
             if 'tls' not in config['apps']:
@@ -258,7 +284,7 @@ class CaddyAPIClient:
             raise Exception(f"Failed to add domain with auto TLS: {str(e)}")
 
     def add_domain_with_tls(self, domain: str, target: str, target_port: int, certificate: str, private_key: str,
-                           cert_selection_policy: Optional[Dict] = None) -> bool:
+                           cert_selection_policy: Optional[Dict] = None, redirect_mode: str = None) -> bool:
         """Add domain with TLS certificate.
 
         Args:
@@ -269,6 +295,7 @@ class CaddyAPIClient:
             private_key (str): PEM-encoded private key
             cert_selection_policy (Optional[Dict], optional): Certificate selection policy. Defaults to None.
                 If not provided, will automatically create one based on the certificate's serial number.
+            redirect_mode (str, optional): Redirect mode. Can be "www_to_domain" or "domain_to_www". Defaults to None.
 
         Returns:
             bool: True if successful
@@ -322,8 +349,33 @@ class CaddyAPIClient:
             timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
             cert_tag = f"{domain}-{serial_number}-{timestamp}"
 
-            # Create route configuration
-            route = {
+            # Create routes configuration
+            routes = []
+            
+            # Handle domain names for redirect
+            base_domain = domain.replace('www.', '') if domain.startswith('www.') else domain
+            www_domain = f"www.{base_domain}"
+            
+            # Add redirect route if redirect_mode is specified
+            if redirect_mode:
+                source_domain = www_domain if redirect_mode == "www_to_domain" else base_domain
+                target_domain = base_domain if redirect_mode == "www_to_domain" else www_domain
+                
+                redirect_route = {
+                    "@id": f"{source_domain}-redirect",
+                    "match": [{"host": [source_domain]}],
+                    "handle": [{
+                        "handler": "static_response",
+                        "headers": {
+                            "Location": [f"https://{target_domain}{{http.request.uri}}"]
+                        },
+                        "status_code": 308
+                    }]
+                }
+                routes.append(redirect_route)
+
+            # Add main route
+            main_route = {
                 "@id": domain,
                 "match": [{"host": [domain]}],
                 "handle": [{
@@ -336,14 +388,15 @@ class CaddyAPIClient:
                             }]
                         }]
                     }]
-                }],
+                }]
             }
+            routes.append(main_route)
 
             # Get current config
             response = self._make_request('GET', '/config/')
             config = response.json()
 
-            # Add route to config
+            # Add routes to config
             if 'apps' not in config:
                 config['apps'] = {}
             if 'http' not in config['apps']:
@@ -355,7 +408,7 @@ class CaddyAPIClient:
             if 'routes' not in config['apps']['http']['servers']['srv0']:
                 config['apps']['http']['servers']['srv0']['routes'] = []
 
-            config['apps']['http']['servers']['srv0']['routes'].append(route)
+            config['apps']['http']['servers']['srv0']['routes'].extend(routes)
 
             # Add certificate configuration
             if 'tls' not in config['apps']:
@@ -409,11 +462,11 @@ class CaddyAPIClient:
             # Get current routes
             routes = config['apps']['http']['servers']['srv0']['routes']
 
-            # Remove domain routes and ACME challenge routes for this domain
+            # Remove domain routes, redirect routes, and ACME challenge routes
             routes = [r for r in routes if not (
-                r.get('@id') == domain or
-                (r.get('match', [{}])[0].get('host', []) == [domain] and
-                 r.get('match', [{}])[0].get('path', []) == ["/.well-known/acme-challenge/*"])
+                r.get('@id') == domain or  # Main domain route
+                r.get('@id') == f"{domain}-redirect" or  # Redirect route for this domain
+                (r.get('match', [{}])[0].get('host', []) == [domain])  # Any route matching this domain
             )]
 
             # Update routes
@@ -653,7 +706,8 @@ class CaddyAPIClient:
 
     def update_domain(self, domain: str, target: str = None, target_port: int = None, 
                      certificate: str = None, private_key: str = None,
-                     cert_selection_policy: Optional[Dict] = None) -> bool:
+                     cert_selection_policy: Optional[Dict] = None,
+                     redirect_mode: str = None) -> bool:
         """Update domain configuration.
 
         Args:
@@ -664,6 +718,7 @@ class CaddyAPIClient:
             private_key (str, optional): PEM-encoded private key. Required if certificate is PEM. Defaults to None.
             cert_selection_policy (Optional[Dict], optional): Certificate selection policy. Defaults to None.
                 If not provided and certificate is updated, will automatically create one based on the certificate's serial number.
+            redirect_mode (str, optional): Redirect mode. Can be "www_to_domain" or "domain_to_www". Defaults to None.
 
         Returns:
             bool: True if successful
@@ -752,6 +807,40 @@ class CaddyAPIClient:
 
                 # Add new certificate
                 config['apps']['tls']['certificates']['load_pem'].append(cert_config)
+
+            # Update redirect route if redirect_mode is provided
+            if redirect_mode:
+                # Find existing redirect route
+                redirect_route = None
+                for route in routes:
+                    if route.get('@id') == f"{domain}-redirect":
+                        redirect_route = route
+                        break
+
+                # Create new redirect route if not found
+                if not redirect_route:
+                    source_domain = f"www.{domain}" if redirect_mode == "www_to_domain" else domain
+                    target_domain = domain if redirect_mode == "www_to_domain" else f"www.{domain}"
+                    
+                    redirect_route = {
+                        "@id": f"{source_domain}-redirect",
+                        "match": [{"host": [source_domain]}],
+                        "handle": [{
+                            "handler": "static_response",
+                            "headers": {
+                                "Location": [f"https://{target_domain}{{http.request.uri}}"]
+                            },
+                            "status_code": 308
+                        }]
+                    }
+                    routes.append(redirect_route)
+                else:
+                    # Update existing redirect route
+                    source_domain = f"www.{domain}" if redirect_mode == "www_to_domain" else domain
+                    target_domain = domain if redirect_mode == "www_to_domain" else f"www.{domain}"
+                    
+                    redirect_route['match'][0]['host'] = [source_domain]
+                    redirect_route['handle'][0]['headers']['Location'] = [f"https://{target_domain}{{http.request.uri}}"]
 
             # Update configuration
             self._make_request('POST', '/config/', data=config)
