@@ -780,16 +780,66 @@ class CaddyAPIClient:
                 if not private_key:
                     raise Exception("Private key is required when updating PEM certificate")
 
+                # Extract certificate serial number for tagging
+                from cryptography import x509
+                from cryptography.hazmat.backends import default_backend
+                import base64
+                from datetime import datetime
+
+                # Parse certificate to get serial number from the first certificate in the bundle
+                cert_blocks = []
+                current_block = []
+                in_cert = False
+                
+                # Split into individual certificate blocks
+                for line in certificate.splitlines():
+                    if "-----BEGIN CERTIFICATE-----" in line:
+                        in_cert = True
+                        current_block = [line]
+                    elif "-----END CERTIFICATE-----" in line:
+                        in_cert = False
+                        current_block.append(line)
+                        cert_blocks.append("\n".join(current_block))
+                    elif in_cert:
+                        current_block.append(line)
+                
+                if not cert_blocks:
+                    raise Exception("No valid certificates found in the provided certificate data")
+                
+                # Use the first certificate (server cert) for the serial number
+                first_cert = cert_blocks[0]
+                cert_lines = []
+                in_cert = False
+                for line in first_cert.splitlines():
+                    if "-----BEGIN CERTIFICATE-----" in line:
+                        in_cert = True
+                        continue
+                    elif "-----END CERTIFICATE-----" in line:
+                        in_cert = False
+                        continue
+                    if in_cert:
+                        cert_lines.append(line)
+                
+                cert_der = base64.b64decode("".join(cert_lines))
+                cert = x509.load_der_x509_certificate(cert_der, default_backend())
+                serial_number = format(cert.serial_number, 'x')  # Convert to hex string
+                
+                # Create tag in format domain-serial-timestamp
+                timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+                cert_tag = f"{domain}-{serial_number}-{timestamp}"
+
                 # Create certificate configuration
                 cert_config = {
                     "certificate": certificate,
                     "key": private_key,
-                    "tags": [f"{domain}-manual"]
+                    "tags": [cert_tag]
                 }
 
-                # Add certificate selection policy if provided
+                # Add certificate selection policy if provided, otherwise create one based on cert tag
                 if cert_selection_policy:
                     cert_config.update(cert_selection_policy)
+                else:
+                    cert_config["tags"] = [cert_tag]
 
                 # Update certificates configuration
                 if 'tls' not in config['apps']:
@@ -807,6 +857,9 @@ class CaddyAPIClient:
 
                 # Add new certificate
                 config['apps']['tls']['certificates']['load_pem'].append(cert_config)
+
+                # Update TLS connection policies
+                self._update_tls_connection_policies(config, domain, cert_tag=cert_tag)
 
             # Update redirect route if redirect_mode is provided
             if redirect_mode:
