@@ -82,6 +82,8 @@ client.update_domain(
 # Delete domain
 client.delete_domain("example.com")  # Removes domain and its redirect configuration
 
+```
+
 ## Features
 
 - Add domains with TLS certificates using PEM data
