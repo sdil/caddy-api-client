@@ -478,9 +478,18 @@ class CaddyAPIClient:
                     if 'subjects' in policy and domain in policy['subjects']:
                         policy['subjects'].remove(domain)
 
-            # Remove TLS connection policies for this domain
+            # Find certificate tags from TLS connection policies before removing them
+            cert_tags_to_remove = set()
             if 'tls_connection_policies' in config['apps']['http']['servers']['srv0']:
                 policies = config['apps']['http']['servers']['srv0']['tls_connection_policies']
+                for policy in policies:
+                    if ('match' in policy and 'sni' in policy['match'] and 
+                        domain in policy['match']['sni'] and
+                        'certificate_selection' in policy and
+                        'all_tags' in policy['certificate_selection']):
+                        cert_tags_to_remove.update(policy['certificate_selection']['all_tags'])
+
+                # Remove TLS connection policies for this domain
                 policies = [p for p in policies if not (
                     'match' in p and 'sni' in p['match'] and domain in p['match']['sni']
                 )]
@@ -488,6 +497,20 @@ class CaddyAPIClient:
                     config['apps']['http']['servers']['srv0']['tls_connection_policies'] = policies
                 else:
                     del config['apps']['http']['servers']['srv0']['tls_connection_policies']
+
+            # Remove certificates with matching tags from the policy
+            if cert_tags_to_remove and 'tls' in config['apps'] and 'certificates' in config['apps']['tls']:
+                if 'load_pem' in config['apps']['tls']['certificates']:
+                    # Filter out certificates with matching tags
+                    config['apps']['tls']['certificates']['load_pem'] = [
+                        cert for cert in config['apps']['tls']['certificates']['load_pem']
+                        if not (set(cert.get('tags', [])) & cert_tags_to_remove)
+                    ]
+                    # Remove the certificates section if empty
+                    if not config['apps']['tls']['certificates']['load_pem']:
+                        del config['apps']['tls']['certificates']['load_pem']
+                        if not config['apps']['tls']['certificates']:
+                            del config['apps']['tls']['certificates']
 
             # Update configuration
             self._make_request('POST', '/config/', data=config)
@@ -704,6 +727,17 @@ class CaddyAPIClient:
         # Check if all domains are using auto TLS
         return all(self._is_domain_using_auto_tls(config, domain) for domain in domains)
 
+    def _normalize_domain(self, domain: str) -> str:
+        """Remove www prefix from domain if present.
+
+        Args:
+            domain (str): Domain name
+
+        Returns:
+            str: Domain name without www prefix
+        """
+        return domain[4:] if domain.startswith('www.') else domain
+
     def update_domain(self, domain: str, target: str = None, target_port: int = None, 
                      certificate: str = None, private_key: str = None,
                      cert_selection_policy: Optional[Dict] = None,
@@ -832,7 +866,7 @@ class CaddyAPIClient:
                 cert_config = {
                     "certificate": certificate,
                     "key": private_key,
-                    "tags": [cert_tag]
+                    "tags": [cert_tag]  # Use domain-serial-timestamp tag
                 }
 
                 # Add certificate selection policy if provided, otherwise create one based on cert tag
@@ -872,11 +906,13 @@ class CaddyAPIClient:
 
                 # Create new redirect route if not found
                 if not redirect_route:
-                    source_domain = f"www.{domain}" if redirect_mode == "www_to_domain" else domain
-                    target_domain = domain if redirect_mode == "www_to_domain" else f"www.{domain}"
+                    # Normalize domain by removing www if present
+                    base_domain = self._normalize_domain(domain)
+                    source_domain = f"www.{base_domain}" if redirect_mode == "www_to_domain" else base_domain
+                    target_domain = base_domain if redirect_mode == "www_to_domain" else f"www.{base_domain}"
                     
                     redirect_route = {
-                        "@id": f"{source_domain}-redirect",
+                        "@id": f"{domain}-redirect",
                         "match": [{"host": [source_domain]}],
                         "handle": [{
                             "handler": "static_response",
@@ -889,8 +925,9 @@ class CaddyAPIClient:
                     routes.append(redirect_route)
                 else:
                     # Update existing redirect route
-                    source_domain = f"www.{domain}" if redirect_mode == "www_to_domain" else domain
-                    target_domain = domain if redirect_mode == "www_to_domain" else f"www.{domain}"
+                    base_domain = self._normalize_domain(domain)
+                    source_domain = f"www.{base_domain}" if redirect_mode == "www_to_domain" else base_domain
+                    target_domain = base_domain if redirect_mode == "www_to_domain" else f"www.{base_domain}"
                     
                     redirect_route['match'][0]['host'] = [source_domain]
                     redirect_route['handle'][0]['headers']['Location'] = [f"https://{target_domain}{{http.request.uri}}"]
